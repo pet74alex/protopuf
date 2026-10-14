@@ -1,4 +1,5 @@
 //   Copyright 2020-2021 PragmaTwice
+//   Copyright 2026 pet74alex
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -76,6 +77,19 @@ namespace pp {
     /// @brief Describes a type which is both @ref encoder and @ref decoder.
     template<typename T>
     concept coder = encoder<T> && decoder<T>;
+
+    /// @brief A structural subset of the @ref coder concept: the type only has to expose `value_type`.
+    ///
+    /// The full @ref coder concept cannot be checked while `T::value_type` is an *incomplete* type,
+    /// because it has to form `decode_result<T::value_type, Mode>` (i.e. `std::pair<value_type, bytes>`).
+    /// Self-referencing (recursive) message types are necessarily incomplete while their own field
+    /// list is being instantiated, so field declarations are constrained with @ref value_coder instead,
+    /// and full @ref coder conformance is statically asserted at encode/decode time
+    /// (when all involved types are complete).
+    template<typename T>
+    concept value_coder = requires {
+        typename T::value_type;
+    };
 
 }
 

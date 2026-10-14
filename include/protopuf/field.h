@@ -1,4 +1,5 @@
-//   Copyright 2020-2021 PragmaTwice
+//   Copyright 2020-2026 PragmaTwice
+//   Copyright 2026 pet74alex
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -22,6 +23,7 @@
 #include "varint.h"
 #include "bool.h"
 #include "fixed_string.h"
+#include "indirect.h"
 #include <optional>
 
 namespace pp {
@@ -62,12 +64,25 @@ namespace pp {
     constexpr uint<1> wire_type = wire_type_impl<T>::value;
 
     /// An attribute of the fields, to represent whether the field can repeat in message
+    /// and how the (singular) value is stored
     enum attribute {
         /// Represents a singular field, which can appear zero times or once in a message
+        /// (stored inline as `std::optional<T>`)
         singular,
         /// Represents a repeated field, which can appear zero times, once or many times in a message
-        repeated
+        repeated,
+        /// Represents a singular field whose value is stored on the heap in a
+        /// @ref indirect "pp::indirect<T>";
+        /// on the wire it is identical to @ref singular. Required for singular fields whose
+        /// value type is the enclosing message itself (self-referencing/recursive messages),
+        /// since `std::optional<T>` cannot hold an incomplete `T`
+        boxed
     };
+
+    /// A concept satisfied while attribute `A` denotes a singular field
+    /// (a field which appears at most once in a message), whatever its storage is
+    template <attribute A>
+    concept singular_attribute = (A != repeated);
 
     template <attribute, typename T, typename>
     struct field_container_impl {
@@ -79,22 +94,58 @@ namespace pp {
         using type = C;
     };
 
+    template <typename T, typename C>
+    struct field_container_impl<boxed, T, C> {
+        using type = indirect<T>;
+    };
+
     /// @brief The underlying container type of a field
     /// @param A the @ref attribute of the field
     /// @param T the underlying object type (to store data) of the field
     /// @param Container the underlying container to store repeated objects, 
     /// it will be used while the attribute `A` is @ref repeated
-    template <attribute A, typename T, std::ranges::sized_range Container = std::vector<T>>
+    ///
+    /// note: `Container` is not constrained with `std::ranges::sized_range` *here*,
+    /// because checking that concept requires a complete element type, which would
+    /// break self-referencing messages (a repeated field of the still-incomplete
+    /// enclosing message, e.g. `std::vector<Node>` inside `Node`); the requirement
+    /// is enforced by `static_assert` where the container is actually used
+    /// (encoding/decoding/skipping), at which point the element type is complete
+    template <attribute A, typename T, typename Container = std::vector<T>>
     using field_container = typename field_container_impl<A, T, Container>::type;
+
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+    /// @brief Lazy key value resolver for the field type key
+    /// @param N the field number, ref to https://developers.google.com/protocol-buffers/docs/encoding#structure
+    /// @param C the @ref coder of the field
+    ///
+    /// Allows to pass incomplete type of @ref coder to @ref field in case of MSVC++ compiler which fails checking concepts for such incomplete types
+    template <uint<4> N, typename C>
+    struct lazy_key_resolver {
+        constexpr operator uint<4>() const noexcept {
+            return (N << 3u) | wire_type<C>;
+        }
+
+       // Overload operators to preserve backward compatibility in bitwise/math operations
+       // This prevents compilation errors if existing code does: field::key | other_val
+       friend constexpr uint<4> operator|(lazy_key_resolver lhs, uint<4> rhs) noexcept { return static_cast<uint<4>>(lhs) | rhs; }
+       friend constexpr uint<4> operator|(uint<4> lhs, lazy_key_resolver rhs) noexcept { return lhs | static_cast<uint<4>>(rhs); }
+       friend constexpr uint<4> operator&(lazy_key_resolver lhs, uint<4> rhs) noexcept { return static_cast<uint<4>>(lhs) & rhs; }
+       friend constexpr uint<4> operator&(uint<4> lhs, lazy_key_resolver rhs) noexcept { return lhs & static_cast<uint<4>>(rhs); }
+       friend constexpr bool operator==(lazy_key_resolver lhs, uint<4> rhs) noexcept { return static_cast<uint<4>>(lhs) == rhs; }
+       friend constexpr bool operator==(uint<4> lhs, lazy_key_resolver rhs) noexcept { return lhs == static_cast<uint<4>>(rhs); }
+    };
+#endif
 
     /// @brief The field type
     /// @param S the name of the field
     /// @param N the field number, ref to https://developers.google.com/protocol-buffers/docs/encoding#structure
     /// @param C the @ref coder of the field
     /// @param A the @ref attribute of the field
-    /// @param Container the container used in @ref field_container, enabled while `A` is @ref repeated.
-    template <basic_fixed_string S, uint<4> N, coder C, attribute A = singular, std::ranges::sized_range Container = std::vector<typename C::value_type>>
-    struct field : field_container<A, typename C::value_type, Container>{
+    /// @param Container the container used in @ref field_container, enabled while `A` is @ref repeated
+    /// (unconstrained here to allow incomplete element types, ref to @ref field_container)
+    template <basic_fixed_string S, uint<4> N, value_coder C, attribute A = singular, typename Container = std::vector<typename C::value_type>>
+    struct field : field_container<A, typename C::value_type, Container> {
         /// name of the field
         static constexpr basic_fixed_string name = S;
 
@@ -104,8 +155,14 @@ namespace pp {
         /// the field number
         static constexpr uint<4> number = N;
 
-        /// key of the field, ref to https://developers.google.com/protocol-buffers/docs/encoding#structure
+        /// @ref key of the field, ref to https://developers.google.com/protocol-buffers/docs/encoding#structure
+#if defined(_MSC_VER) && !defined(__clang__) && !defined(__INTEL_COMPILER)
+        /// Using lazy_key_resolver for MSVC pulls 'key' into the scope of 'field' 
+        /// without executing the initialization block prematurely.
+        static constexpr lazy_key_resolver<N, C> key{};
+#else
         static constexpr uint<4> key = (N << 3u) | wire_type<C>;
+#endif
 
         /// @ref coder of the field 
         using coder = C;
@@ -117,6 +174,18 @@ namespace pp {
         using base_type = field_container<A, typename C::value_type, Container>;
 
         using base_type::base_type;
+
+        /// forward value assignment to @ref base_type (i.e. assigning a value to an
+        /// `std::optional`/@ref indirect based field); in particular, this makes assigning
+        /// a message to a field of the *same message type* (self-referencing messages)
+        /// pick the value assignment instead of the inaccessible derived-to-base conversion
+        template <typename U>
+            requires (!std::same_as<std::remove_cvref_t<U>, field>)
+                && requires (base_type& b, U&& u) { b = std::forward<U>(u); }
+        constexpr field& operator=(U&& u) {
+            static_cast<base_type&>(*this) = std::forward<U>(u);
+            return *this;
+        }
 
         field(const base_type& base) : base_type(base) {}
         field(base_type&& base) : base_type(std::move(base)) {}
@@ -226,7 +295,7 @@ namespace pp {
     template <typename>
     constexpr inline bool is_field = false;
 
-    template <basic_fixed_string S, uint<4> N, coder C, attribute A, typename Container>
+    template <basic_fixed_string S, uint<4> N, value_coder C, attribute A, typename Container>
     constexpr inline bool is_field <field<S, N, C, A, Container>> = true;
 
     /// A concept satisfied while type `T` is a field type.
@@ -273,7 +342,7 @@ namespace pp {
     /// Checks whether a field is empty
     template <field_c T>
     constexpr bool empty_field(const T& v) {
-        if constexpr (T::attr == singular) {
+        if constexpr (singular_attribute<T::attr>) {
             return !v.has_value();
         } else {
             return v.empty();
@@ -283,7 +352,7 @@ namespace pp {
     /// Push a value into a field: overwrite if it is singular, insert to end otherwise
     template <field_c F, typename T>
     constexpr void push_field(F& f, T&& v) {
-        if constexpr (F::attr == singular) {
+        if constexpr (singular_attribute<F::attr>) {
             f = std::forward<T>(v);
         } else {
             *std::inserter(f, f.end()) = std::forward<T>(v);
@@ -307,7 +376,7 @@ namespace pp {
     /// Merge a field into another field: overwrite if it is singular and non-empty, merge to end otherwise
     template <merge_mode mode = merge_mode{}, field_c D, typename S> requires field_c<std::remove_cvref_t<S>>
     constexpr void merge_field(D& f, S&& v) {
-        if constexpr (D::attr == singular) {
+        if constexpr (singular_attribute<D::attr>) {
             if constexpr (mode.singular_mode == merge_mode::singular::override) {
                 if (!empty_field(v)) {
                     f = std::forward<S>(v);
