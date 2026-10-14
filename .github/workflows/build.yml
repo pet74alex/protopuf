@@ -38,6 +38,12 @@ jobs:
           - os: ubuntu-22.04
             type: Release
             compiler: clang-12
+          - os: ubuntu-22.04
+            type: Debug
+            compiler: clang-14
+          - os: ubuntu-22.04
+            type: Release
+            compiler: clang-14
 
           # Ubuntu 24.04: newer GCC / Clang from distro packages
           - os: ubuntu-24.04
@@ -52,12 +58,6 @@ jobs:
           - os: ubuntu-24.04
             type: Release
             compiler: gcc-14
-          - os: ubuntu-24.04
-            type: Debug
-            compiler: clang-14
-          - os: ubuntu-24.04
-            type: Release
-            compiler: clang-14
           - os: ubuntu-24.04
             type: Debug
             compiler: clang-18
@@ -164,7 +164,7 @@ jobs:
 
       - name: generate build script
         if: ${{ !startsWith(matrix.os, 'windows') }}
-        run: cmake $BENCHMARK $COMPATIBILITY -DCMAKE_BUILD_TYPE=${{ matrix.type }} ${{ matrix.coverage }} .
+        run: cmake $BENCHMARK $COMPATIBILITY -DBUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=${{ matrix.type }} ${{ matrix.coverage }} .
 
       - name: generate build script
         if: ${{ startsWith(matrix.os, 'windows') }}
