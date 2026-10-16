@@ -1,4 +1,5 @@
 #   Copyright 2020-2021 PragmaTwice
+#   Copyright 2026 pet74alex
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -18,7 +19,17 @@ project(protopuf)
 message(NOTICE "[TIP] Expected a compiler with C++20 support (i.e. GCC 11, Clang 12 or above)")
 message(NOTICE "[TIP] Check out https://github.com/PragmaTwice/protopuf for more details")
 
-set(CXX_STANDARD_REQUIRED ON)
+#   Only set C++20 standard in case it's a standalone project,
+#   so top level projects standard eg. C++23 wouldn't be overriden
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+else()
+    # Used as a dependency. Verify parent set at least C++20
+    if(NOT CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD LESS 20)
+        message(FATAL_ERROR "protopuf requires a C++ standard of 20 or higher. The current project is using: '${CMAKE_CXX_STANDARD}'")
+    endif()
+endif()
 
 add_library(protopuf INTERFACE)
 target_include_directories(protopuf INTERFACE
@@ -77,6 +88,11 @@ if(BUILD_TESTS)
     if(ENABLE_BENCHMARK)
         add_subdirectory(test/benchmark)
     endif()
+endif()
+
+option(BUILD_EXAMPLES "Build examples (OpenTelemetry OTLP trace encoding)" OFF)
+if(BUILD_EXAMPLES)
+    add_subdirectory(example)
 endif()
 
 install(DIRECTORY include DESTINATION "${CMAKE_INSTALL_PREFIX}")
